@@ -179,7 +179,13 @@ Type TExpressionBinder
 						indexedTarget.indexes = BoundExpressions(indexedTargetSyntax.indexes)
 						bound.target = indexedTarget
 					End If
-					indexedTarget.access = bound.indexAccess
+					' For simple "=" the assignment index-access is the setter and should
+					' own the target. For compound ops the left-hand index expression
+					' already carries Operator[] (getter); keep that so lowering can
+					' read-modify-write without calling Operator[]= as a getter.
+					If assignment.operatorToken.text = "=" Or Not indexedTarget.access Then
+						indexedTarget.access = bound.indexAccess
+					End If
 				End If
 			End If
 			Local required:TSemanticType
@@ -882,6 +888,7 @@ Type TExpressionBinder
 		Local assignment:TAssignmentStatementSyntax = TAssignmentStatementSyntax(node)
 		If assignment Then
 			Local leftType:TSemanticType
+			Local indexedTarget:TIndexExpressionSyntax = TIndexExpressionSyntax(assignment.left)
 			If assignment.operatorToken.text = "=" Then
 				' An indexed assignment resolves Operator[]= with the assigned value
 				' appended to its bracket arguments.  Binding the target first as a
@@ -889,12 +896,15 @@ Type TExpressionBinder
 				' setter-only Type must not receive a speculative missing-Operator[]
 				' diagnostic when its Operator[]= overload is applicable.
 				Local previousIndexSetterTarget:TIndexExpressionSyntax = indexSetterTarget
-				indexSetterTarget = TIndexExpressionSyntax(assignment.left)
+				indexSetterTarget = indexedTarget
 				leftType = BindExpression(assignment.left, scope)
 				indexSetterTarget = previousIndexSetterTarget
+			Else
+				' Compound assignments need the current element value (Operator[])
+				' before resolving Operator[]= for the write-back.
+				leftType = BindExpression(assignment.left, scope)
 			End If
 			Local rightType:TSemanticType = BindContextualExpression(assignment.right, scope, leftType)
-			Local indexedTarget:TIndexExpressionSyntax = TIndexExpressionSyntax(assignment.left)
 			If indexedTarget And assignment.operatorToken.text = "=" Then
 				Local receiverType:TSemanticType = BindExpression(indexedTarget.expression, scope)
 				Local indexTypes:TSemanticType[] = BindExpressions(indexedTarget.indexes, scope)
@@ -905,6 +915,31 @@ Type TExpressionBinder
 					If resolvedSetter Then
 						RecordIndex(assignment, INDEX_ACCESS_OPERATOR, receiverType, resolvedSetter.returnType, resolvedSetter)
 						Return
+					End If
+				End If
+			End If
+			' Compound assignment through Operator[] requires Operator[]= so the
+			' updated element can be written back (e.g. map[key] :+ value).
+			If indexedTarget And assignment.operatorToken.text <> "=" Then
+				Local receiverType:TSemanticType = BindExpression(indexedTarget.expression, scope)
+				Local indexTypes:TSemanticType[] = BindExpressions(indexedTarget.indexes, scope)
+				If TNamedSemanticType(receiverType) Then
+					Local elementType:TSemanticType = leftType
+					If Not elementType Then
+						Local getterAccess:TResolvedIndexAccess = model.ResolvedIndex(indexedTarget)
+						If getterAccess Then elementType = getterAccess.resultType
+					End If
+					If elementType Then
+						Local setterArguments:TExpressionSyntax[] = AppendExpression(indexedTarget.indexes, assignment.right)
+						Local setterTypes:TSemanticType[] = AppendType(indexTypes, elementType)
+						Local resolvedSetter:TResolvedCall = ResolveOperator(assignment, indexedTarget, "[]=", receiverType, setterArguments, setterTypes, scope)
+						If resolvedSetter Then
+							RecordIndex(assignment, INDEX_ACCESS_OPERATOR, receiverType, resolvedSetter.returnType, resolvedSetter)
+							' ResolveOperator also records on resolvedCallMap. Clear that so
+							' the assignment is not treated as an element Operator:+ overload;
+							' the setter lives only on the index-access record.
+							model.resolvedCallMap.Remove(assignment)
+						End If
 					End If
 				End If
 			End If

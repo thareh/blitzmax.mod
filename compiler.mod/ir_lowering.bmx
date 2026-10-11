@@ -4699,6 +4699,102 @@ Type TCompilerIrLowerer
 				setterStatement.expression = LowerExpression(setterCall)
 				Return setterStatement
 			End If
+			' Compound assignment through Operator[] / Operator[]=: read the current
+			' element, apply the compound operator, then write the result back.
+			If assignment.operatorText <> "=" And assignment.indexAccess And assignment.indexAccess.accessKind = INDEX_ACCESS_OPERATOR And assignment.indexAccess.resolvedCall And arrayTarget And arrayTarget.access And arrayTarget.access.accessKind = INDEX_ACCESS_OPERATOR And arrayTarget.access.resolvedCall Then
+				Local getterCall:TBoundCallExpression = New TBoundCallExpression
+				getterCall.boundKind = BOUND_EXPRESSION_CALL
+				getterCall.syntax = arrayTarget.syntax
+				getterCall.semanticType = arrayTarget.access.resultType
+				If Not getterCall.semanticType Then getterCall.semanticType = arrayTarget.semanticType
+				getterCall.isSynthetic = True
+				getterCall.resolvedCall = arrayTarget.access.resolvedCall
+				getterCall.receiver = arrayTarget.receiver
+				getterCall.arguments = arrayTarget.indexes
+				Local currentValue:TCompilerIrExpression = LowerExpression(getterCall)
+				If Not currentValue Then Return Null
+				Local currentMaterialization:TCompilerIrMaterialize = BeginMaterialization(currentValue, bound.syntax)
+				Local currentReference:TCompilerIrSymbolReference = TemporaryReference(currentMaterialization, arrayTarget, bound.syntax, "index_current")
+				Local updatedValue:TCompilerIrExpression
+				Local rhs:TCompilerIrExpression = LowerExpression(assignment.value)
+				If Not rhs Then Return Null
+				Local stringConcatAssignment:Int = assignment.operatorText = ":+" And IsStringType(assignment.target.semanticType)
+				Local arrayConcatAssignment:Int = assignment.operatorText = ":+" And IsArrayType(assignment.target.semanticType)
+				If stringConcatAssignment Then
+					Local concat:TCompilerIrStringConcat = New TCompilerIrStringConcat
+					concat.kind = IR_EXPRESSION_STRING_CONCAT
+					concat.semanticType = TypeName(assignment.target.semanticType)
+					concat.source = SourceOf(bound.syntax)
+					concat.left = currentReference
+					concat.right = LowerStringOperand(assignment.value)
+					updatedValue = SequenceStringConcat(concat, bound.syntax)
+				Else If arrayConcatAssignment Then
+					Local arrayConcat:TCompilerIrArrayConcat = New TCompilerIrArrayConcat
+					arrayConcat.kind = IR_EXPRESSION_ARRAY_CONCAT
+					arrayConcat.semanticType = TypeName(assignment.target.semanticType)
+					arrayConcat.source = SourceOf(bound.syntax)
+					arrayConcat.left = currentReference
+					arrayConcat.right = rhs
+					updatedValue = SequenceArrayConcat(arrayConcat, bound.syntax)
+				Else If assignment.resolvedCall And assignment.resolvedCall.routine And assignment.resolvedCall <> assignment.indexAccess.resolvedCall Then
+					Local operatorCall:TCompilerIrCall = New TCompilerIrCall
+					operatorCall.kind = IR_EXPRESSION_CALL
+					operatorCall.source = SourceOf(bound.syntax)
+					operatorCall.semanticType = TypeName(assignment.resolvedCall.returnType)
+					If Not operatorCall.semanticType Then operatorCall.semanticType = TypeName(assignment.target.semanticType)
+					Local targetFunction:TCompilerIrFunction = TCompilerIrFunction(functionsBySymbol.ValueForKey(assignment.resolvedCall.routine))
+					If targetFunction Then
+						operatorCall.functionId = targetFunction.functionId
+						operatorCall.functionName = targetFunction.name
+						operatorCall.dispatchKind = IR_CALL_DISPATCH_DIRECT
+					End If
+					operatorCall.receiver = currentReference
+					operatorCall.arguments = [rhs]
+					updatedValue = operatorCall
+				Else
+					Local binaryOperator:String = CompoundAssignmentBinaryOperator(assignment.operatorText)
+					If Not binaryOperator Then
+						AddUnsupported("BMXC1005", TBccMessages.IrLoweringCompoundAssignmentTargetUnsupported(), bound.syntax)
+						Return Null
+					End If
+					Local binary:TCompilerIrBinary = New TCompilerIrBinary
+					binary.kind = IR_EXPRESSION_BINARY
+					binary.operatorText = binaryOperator
+					binary.semanticType = TypeName(assignment.target.semanticType)
+					binary.source = SourceOf(bound.syntax)
+					binary.left = currentReference
+					binary.right = rhs
+					updatedValue = binary
+				End If
+				If Not updatedValue Then Return Null
+				Local updatedMaterialization:TCompilerIrMaterialize = BeginMaterialization(updatedValue, bound.syntax)
+				Local updatedReference:TCompilerIrSymbolReference = TemporaryReference(updatedMaterialization, arrayTarget, bound.syntax, "index_updated")
+				Local setterCall:TBoundCallExpression = New TBoundCallExpression
+				setterCall.boundKind = BOUND_EXPRESSION_CALL
+				setterCall.syntax = arrayTarget.syntax
+				setterCall.semanticType = assignment.indexAccess.resultType
+				setterCall.isSynthetic = True
+				setterCall.resolvedCall = assignment.indexAccess.resolvedCall
+				setterCall.receiver = arrayTarget.receiver
+				setterCall.arguments = arrayTarget.indexes + [assignment.value]
+				Local loweredSetter:TCompilerIrExpression = LowerExpression(setterCall)
+				If Not loweredSetter Then Return Null
+				' Replace the trailing argument with the computed update while keeping
+				' index/receiver evaluation order from the ordinary setter lowering path.
+				Local setterIrCall:TCompilerIrCall = TCompilerIrCall(loweredSetter)
+				If setterIrCall And setterIrCall.arguments.length Then
+					setterIrCall.arguments[setterIrCall.arguments.length - 1] = updatedReference
+				End If
+				updatedMaterialization.expression = loweredSetter
+				updatedMaterialization.semanticType = loweredSetter.semanticType
+				currentMaterialization.expression = updatedMaterialization
+				currentMaterialization.semanticType = loweredSetter.semanticType
+				Local setterStatement:TCompilerIrExpressionStatement = New TCompilerIrExpressionStatement
+				setterStatement.kind = IR_STATEMENT_EXPRESSION
+				setterStatement.source = SourceOf(bound.syntax)
+				setterStatement.expression = currentMaterialization
+				Return setterStatement
+			End If
 			If assignment.resolvedCall And assignment.resolvedCall.routine Then
 				Local operatorStatement:TCompilerIrExpressionStatement = New TCompilerIrExpressionStatement
 				operatorStatement.kind = IR_STATEMENT_EXPRESSION
@@ -5653,6 +5749,23 @@ Type TCompilerIrLowerer
 				Return True
 		End Select
 		Return False
+	End Function
+
+	Function CompoundAssignmentBinaryOperator:String(operatorText:String)
+		Select operatorText.ToLower()
+			Case ":+" Return "+"
+			Case ":-" Return "-"
+			Case ":*" Return "*"
+			Case ":/" Return "/"
+			Case ":&" Return "&"
+			Case ":|" Return "|"
+			Case ":~~" Return "~~"
+			Case ":shl" Return "shl"
+			Case ":shr" Return "shr"
+			Case ":sar" Return "sar"
+			Case ":mod" Return "mod"
+		End Select
+		Return ""
 	End Function
 
 	Method NewLoopId:String()
