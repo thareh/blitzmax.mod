@@ -5,6 +5,7 @@ SuperStrict
 
 Import BRL.FileSystem
 Import BRL.TextStream
+Import BlitzMax.Format
 Import BlitzMax.Locale
 Import Text.Json
 Import "protocol.bmx"
@@ -248,6 +249,10 @@ Type TBlitzMaxLspServer
 				Return SignatureHelp(id, TJSONObject(request.Get("params")))
 			Case "textDocument/codeAction"
 				Return CodeActions(id, TJSONObject(request.Get("params")))
+			Case "textDocument/formatting"
+				Return Formatting(id, TJSONObject(request.Get("params")))
+			Case "textDocument/rangeFormatting"
+				Return RangeFormatting(id, TJSONObject(request.Get("params")))
 			Case "textDocument/prepareTypeHierarchy"
 				Return PrepareTypeHierarchy(id, TJSONObject(request.Get("params")))
 			Case "typeHierarchy/supertypes"
@@ -323,6 +328,8 @@ Type TBlitzMaxLspServer
 		codeActions.Set("codeActionKinds", codeActionKinds)
 		codeActions.Set("resolveProvider", New TJSONBool.Create(False))
 		capabilities.Set("codeActionProvider", codeActions)
+		capabilities.Set("documentFormattingProvider", New TJSONBool.Create(True))
+		capabilities.Set("documentRangeFormattingProvider", New TJSONBool.Create(True))
 		capabilities.Set("typeHierarchyProvider", New TJSONBool.Create(True))
 		capabilities.Set("callHierarchyProvider", New TJSONBool.Create(True))
 		Local signatureHelp:TJSONObject = JsonObject()
@@ -339,7 +346,7 @@ Type TBlitzMaxLspServer
 		capabilities.Set("workspace", workspace)
 		Local serverInfo:TJSONObject = JsonObject()
 		serverInfo.Set("name", "BlitzMax Language Server")
-		serverInfo.Set("version", "0.24.7")
+		serverInfo.Set("version", "0.24.15")
 		Local result:TJSONObject = JsonObject()
 		result.Set("capabilities", capabilities)
 		result.Set("serverInfo", serverInfo)
@@ -355,6 +362,59 @@ Type TBlitzMaxLspServer
 		If Not document Then Return [JsonResponse(id, JsonNull()).SaveString(JSON_COMPACT)]
 		Local result:TJSON = TBlitzMaxLspHover.Query(document, DocumentWorkspace(document), Int(position.GetInteger("line")), Int(position.GetInteger("character")))
 		Return [JsonResponse(id, result).SaveString(JSON_COMPACT)]
+	End Method
+
+	Method Formatting:String[](id:TJSON, params:TJSONObject)
+		Local document:TLspDocument = RequestDocument(params)
+		If Not document Then Return [JsonResponse(id, JsonArray()).SaveString(JSON_COMPACT)]
+		Return [JsonResponse(id, FormatDocumentEdits(document, params)).SaveString(JSON_COMPACT)]
+	End Method
+
+	Method RangeFormatting:String[](id:TJSON, params:TJSONObject)
+		Local document:TLspDocument = RequestDocument(params)
+		If Not document Or Not params Then Return [JsonResponse(id, JsonArray()).SaveString(JSON_COMPACT)]
+		Local selection:TJSONObject = TJSONObject(params.Get("range"))
+		If Not selection Then Return [JsonResponse(id, JsonArray()).SaveString(JSON_COMPACT)]
+		Local selectionStart:TJSONObject = TJSONObject(selection.Get("start"))
+		Local selectionEnd:TJSONObject = TJSONObject(selection.Get("end"))
+		If Not selectionStart Or Not selectionEnd Then Return [JsonResponse(id, JsonArray()).SaveString(JSON_COMPACT)]
+		Local source:TSourceText = TSourceText.Create(document.text, document.path)
+		Local startOffset:Int = TLspPositions.Offset(source, Int(selectionStart.GetInteger("line")), Int(selectionStart.GetInteger("character")))
+		Local endOffset:Int = TLspPositions.Offset(source, Int(selectionEnd.GetInteger("line")), Int(selectionEnd.GetInteger("character")))
+		Local selected:TJSONArray = JsonArray()
+		If endOffset <= startOffset Then Return [JsonResponse(id, selected).SaveString(JSON_COMPACT)]
+		Local edits:TJSONArray = FormatDocumentEdits(document, params)
+		For Local index:Int = 0 Until edits.Size()
+			Local edit:TJSONObject = TJSONObject(edits.Get(index))
+			Local editRange:TJSONObject = TJSONObject(edit.Get("range"))
+			Local editStart:TJSONObject = TJSONObject(editRange.Get("start"))
+			Local editEnd:TJSONObject = TJSONObject(editRange.Get("end"))
+			Local editStartOffset:Int = TLspPositions.Offset(source, Int(editStart.GetInteger("line")), Int(editStart.GetInteger("character")))
+			Local editEndOffset:Int = TLspPositions.Offset(source, Int(editEnd.GetInteger("line")), Int(editEnd.GetInteger("character")))
+			If editStartOffset >= startOffset And editStartOffset < endOffset And editEndOffset <= endOffset Then selected.Append(edit)
+		Next
+		Return [JsonResponse(id, selected).SaveString(JSON_COMPACT)]
+	End Method
+
+	Method FormatDocumentEdits:TJSONArray(document:TLspDocument, params:TJSONObject)
+		Local workspace:TLspWorkspaceContext = DocumentWorkspace(document)
+		Local options:TBlitzMaxFormatOptions = workspace.configuration.formatOptions.Copy()
+		Local editorOptions:TJSONObject = TJSONObject(params.Get("options"))
+		If editorOptions Then
+			options.tabSize = Int(editorOptions.GetInteger("tabSize"))
+			options.insertSpaces = editorOptions.GetBool("insertSpaces")
+		End If
+		Local nativeEdits:TBlitzMaxFormatEdits = TBlitzMaxFormatter.Query(document.text, document.path, options)
+		Local source:TSourceText = TSourceText.Create(document.text, document.path)
+		Local result:TJSONArray = JsonArray()
+		For Local index:Int = 0 Until nativeEdits.Size()
+			Local nativeEdit:TBlitzMaxFormatEdit = nativeEdits.Get(index)
+			Local edit:TJSONObject = JsonObject()
+			edit.Set("range", TLspPositions.Range(source, TSourceSpan.Create(nativeEdit.start, nativeEdit.finish - nativeEdit.start)))
+			edit.Set("newText", nativeEdit.newText)
+			result.Append(edit)
+		Next
+		Return result
 	End Method
 
 	Method Definition:String[](id:TJSON, params:TJSONObject)

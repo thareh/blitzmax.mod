@@ -9,7 +9,16 @@ about: Provides protocol framing, document and workspace services, and an embedd
 End Rem
 Module BlitzMax.LSP
 
-ModuleInfo "Version: 0.24.12"
+ModuleInfo "Version: 0.24.21"
+ModuleInfo "History: Use the standalone BlitzMax.Format engine for document and range formatting."
+ModuleInfo "History: Add configurable blank lines between declarations and after control blocks."
+ModuleInfo "History: Trim trailing whitespace outside protected multiline and native text."
+ModuleInfo "History: Add token-safe compact spacing for assignment and binary operators."
+ModuleInfo "History: Add configurable spacing around parsed assignments and binary expressions."
+ModuleInfo "History: Add configurable metadata brace and call-parenthesis spacing."
+ModuleInfo "History: Allow Case and Default labels to align with Select while indenting case bodies."
+ModuleInfo "History: Add configurable spacing after commas while preserving wrapped lines and multiline strings."
+ModuleInfo "History: Add conservative document and range formatting for indentation, If headers, and named block endings."
 ModuleInfo "History: Localise BLS protocol and installed-module discovery errors."
 ModuleInfo "History: Honour the LSP client locale for user-facing diagnostics."
 ModuleInfo "History: Added a preferred Self-qualification fix for hidden-field self-assignment warnings."
@@ -20,6 +29,7 @@ ModuleInfo "Copyright: 2026 Bruce A Henderson and contributors"
 Import BRL.Map
 Import BRL.Stream
 Import Text.Json
+Import BlitzMax.Format
 Import BlitzMax.Language
 
 Import "bls_messages.generated.bmx"
